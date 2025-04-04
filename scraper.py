@@ -10,6 +10,7 @@ import feedparser # Import feedparser
 from datetime import datetime # Import datetime
 import concurrent.futures # Added for parallel processing
 import threading # Added for locks
+import re # Added for regular expressions
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -33,7 +34,7 @@ def scrape_content(url, output_dir, user_agent):
         response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to fetch {url}: {e}")
-        return None # Return None to indicate failure
+        return None, [] # Return None to indicate failure
 
     soup = BeautifulSoup(response.content, 'html.parser')
 
@@ -93,14 +94,34 @@ def scrape_content(url, output_dir, user_agent):
             content_area = soup.body
             if not content_area:
                  logging.error(f"Could not extract any content from {url}")
-                 return None # Cannot proceed
+                 return None, [] # Cannot proceed
 
     # Convert the found content area to Markdown
     markdown_content = md(str(content_area), heading_style="ATX")
 
+    # --- Extract Document Links --- 
+    document_links_md = ""
+    document_urls = [] # Initialize list to store extracted document URLs
+    attachment_sections = soup.select('section.gem-c-attachment, div.gem-c-attachment') # Select common attachment containers
+    if attachment_sections:
+        doc_links = []
+        for section in attachment_sections:
+            link_tag = section.select_one('.gem-c-attachment__link') # Common link class within attachments
+            if link_tag and link_tag.has_attr('href'):
+                href = link_tag['href']
+                text = link_tag.get_text(strip=True)
+                absolute_url = urljoin(url, href)
+                # Exclude non-http links and potentially links to the page itself if needed
+                if absolute_url.startswith('http'):
+                    doc_links.append(f"- [{text}]({absolute_url})")
+                    document_urls.append(absolute_url) # Store the URL
+
+        if doc_links:
+            document_links_md = "\n\n## Documents\n\n" + "\n".join(doc_links)
+
     # --- Combine and Save --- 
     # Prepend metadata and source URL
-    full_markdown_content = f"Source: {url}\n\n{title_text}{lead_text}{metadata_text}{markdown_content}"
+    full_md_content = f"Source: {url}\n\n{title_text}\n\n{lead_text}\n\n{metadata_text}\n\n---\n\n{markdown_content}{document_links_md}"
 
     # Create filename from URL path
     parsed_url = urlparse(url)
@@ -123,39 +144,94 @@ def scrape_content(url, output_dir, user_agent):
     os.makedirs(domain_output_dir, exist_ok=True) # Ensure the domain directory exists
     filepath = os.path.join(domain_output_dir, filename)
 
-    # Prepend metadata and source URL to the Markdown content
-    full_md_content = f"Source: {url}\n\n{title_text}\n\n{lead_text}\n\n{metadata_text}\n\n---\n\n{markdown_content}"
-
     try:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(full_md_content)
         logging.info(f"Saved content from {url} to {filepath}")
-        return content_area # Return the soup object of the main content for potential crawling
+        return content_area, document_urls # Return soup object and list of discovered doc URLs
     except IOError as e:
         logging.error(f"Failed to write file {filepath}: {e}")
-        return None # Indicate failure
+        return None, [] # Indicate failure, return empty list for doc_urls
 
-# --- Helper function to parse a single feed --- 
-def parse_feed(feed_url):
-    urls_from_feed = []
-    logging.info(f"Fetching feed URL: {feed_url}")
+# Function to download binary files (like PDFs) directly
+def download_binary_file(url, output_dir, user_agent):
+    """Downloads a binary file from a URL and saves it.
+
+    Args:
+        url (str): The URL of the binary file.
+        output_dir (str): The base directory to save the file.
+        user_agent (str): The User-Agent string for the request.
+
+    Returns:
+        str: The URL if download and save were successful, None otherwise.
+    """
+    headers = {
+        'User-Agent': user_agent
+    }
+    filepath = None # Initialize filepath to handle potential errors before assignment
     try:
-        feed_data = feedparser.parse(feed_url)
-        if feed_data.bozo:
-             logging.warning(f"Feed may be ill-formed ({feed_url}): {feed_data.bozo_exception}")
-        if not feed_data.entries:
-             logging.warning(f"No entries found in feed: {feed_url}")
-        else:
-            for entry in feed_data.entries:
-                if 'link' in entry:
-                    urls_from_feed.append(entry.link)
-                    logging.info(f"  Added URL from feed ({feed_url}): {entry.link}")
-                else:
-                    logging.warning(f"  Skipping feed entry without link ({feed_url}): {entry.get('title', '[No Title]')}")
+        logging.debug(f"Attempting to download binary file: {url}")
+        response = requests.get(url, headers=headers, stream=True, timeout=60) # Timeout for request
+        response.raise_for_status() # Check for HTTP errors
+
+        # Determine filename from URL path
+        parsed_url = urlparse(url)
+        filename = os.path.basename(parsed_url.path)
+        if not filename:
+            filename = f"downloaded_{parsed_url.netloc}.bin"
+            logging.warning(f"Could not determine filename from URL path: {url}. Using {filename}")
+        
+        # Sanitize filename
+        filename = filename.replace(':', '-').replace('/', '_').replace('\\', '_')
+
+        # Optional: Add date prefix if date pattern found in URL path (for consistency)
+        formatted_date_prefix = ""
+        date_match = re.search(r'/(\d{4})/(\d{1,2})/(\d{1,2})/', parsed_url.path)
+        if date_match:
+            year, month, day = map(int, date_match.groups())
+            try:
+                file_date = datetime(year, month, day)
+                formatted_date_prefix = file_date.strftime('%Y-%m-%d')
+                filename = f"{formatted_date_prefix}_{filename}"
+            except ValueError:
+                logging.warning(f"Invalid date {year}-{month}-{day} in binary URL path {parsed_url.path}, skipping prefix.")
+        
+        # Create domain-specific directory
+        domain_name = parsed_url.netloc
+        domain_output_dir = os.path.join(output_dir, domain_name)
+        os.makedirs(domain_output_dir, exist_ok=True)
+        filepath = os.path.join(domain_output_dir, filename)
+
+        # Save the file chunk by chunk
+        bytes_written = 0
+        with open(filepath, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk: # filter out keep-alive new chunks
+                    f.write(chunk)
+                    bytes_written += len(chunk)
+        
+        if bytes_written == 0:
+            logging.warning(f"Downloaded file {filepath} appears empty (0 bytes).")
+        
+        logging.info(f"Saved binary file from {url} to {filepath} ({bytes_written} bytes)")
+        return url # Success
+    
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to download binary file {url}: {e}")
+        return None
+    except IOError as e:
+        logging.error(f"Failed to write binary file {filepath}: {e}")
+        return None
     except Exception as e:
-        logging.error(f"Failed to parse feed {feed_url}: {e}")
-        # Optionally raise or return an empty list on error
-    return urls_from_feed
+        logging.error(f"Unexpected error downloading {url}: {e}")
+        # Clean up partial file if download failed mid-way
+        if filepath and os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+                logging.info(f"Cleaned up partially written file: {filepath}")
+            except OSError as rm_err:
+                logging.error(f"Failed to clean up partial file {filepath}: {rm_err}")
+        return None
 
 # Function to find relevant sub-links within the content area
 def find_sub_links(base_url, content_area):
@@ -236,8 +312,11 @@ def main():
     elif args.feed_file:
         try:
             with open(args.feed_file, 'r') as f:
-                feed_urls_to_parse.extend([line.strip() for line in f if line.strip()])
-            logging.info(f"Read {len(feed_urls_to_parse)} feed URLs from {args.feed_file}")
+                # Read lines, strip whitespace, ignore empty lines and comments
+                feed_urls_to_parse = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
+            logging.info(f"Read {len(feed_urls_to_parse)} feed URLs (ignoring comments/blanks) from {args.feed_file}")
+            if not feed_urls_to_parse:
+                logging.warning(f"No valid feed URLs found in {args.feed_file} after filtering.")
         except FileNotFoundError:
             logging.error(f"Feed file not found: {args.feed_file}")
             return # Exit if feed file is specified but not found
@@ -290,31 +369,19 @@ def main():
 
         # Use ThreadPoolExecutor for parallel scraping at this depth
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-            future_to_url = {}
-            for url in urls_to_process_this_depth:
-                with processed_urls_lock:
-                    if url in processed_urls:
-                        continue # Skip if already added to processed set (e.g., from a previous depth)
-                    processed_urls.add(url) # Mark as processed *before* submitting
-                future = executor.submit(scrape_content, url, args.output_dir, args.user_agent)
-                future_to_url[future] = url
-
-            processed_count_this_depth = 0
+            future_to_url = {executor.submit(scrape_and_process, url, args.output_dir, args.user_agent, processed_urls_lock, scrape_results): url
+                           for url in urls_to_process_this_depth}
+ 
+            successfully_scraped_this_depth = []
             for future in concurrent.futures.as_completed(future_to_url):
-                url = future_to_url[future]
-                processed_count_this_depth += 1
+                original_url = future_to_url[future]
                 try:
-                    result = future.result() # result is the content_area or None
-                    if result:
-                        logging.debug(f"Successfully scraped {url} (Depth {current_depth}, Task {processed_count_this_depth}/{len(future_to_url)})")
-                        # Store result thread-safely (though dict assignment is generally atomic)
-                        with processed_urls_lock:
-                             scrape_results[url] = result
-                        successfully_scraped_this_depth.add(url)
-                    # else: logging handled in scrape_content
-
+                    processed_url_result = future.result() # Returns URL on success, None on failure/skip
+                    if processed_url_result: # Check if the result is not None
+                        successfully_scraped_this_depth.append(processed_url_result)
+                        # Note: Link finding later will use scrape_results, which only contains HTML results
                 except Exception as exc:
-                    logging.error(f'URL {url} (Depth {current_depth}) generated an exception during scraping: {exc}')
+                    logging.error(f'URL {original_url} (Depth {current_depth}) generated an exception during scraping: {exc}')
 
         logging.info(f"--- Finished scraping for Depth {current_depth} --- ")
 
@@ -324,24 +391,45 @@ def main():
         
         # Sequentially process results from the completed depth to find links for the next
         for parent_url in successfully_scraped_this_depth:
-            content_area = scrape_results.get(parent_url) # Get result stored earlier
-            if content_area:
-                sub_links = find_sub_links(parent_url, content_area)
-                parent_domain = urlparse(parent_url).netloc
-                for link in sub_links:
-                    # Apply domain restriction if needed
-                    if args.same_domain:
-                        link_domain = urlparse(link).netloc
-                        if link_domain != parent_domain:
-                            logging.debug(f"Skipping different domain link: {link} (parent: {parent_url})")
-                            continue
+            # Retrieve stored results (content_area for crawling, document_urls for direct links)
+            result_tuple = scrape_results.get(parent_url)
+ 
+            # Initialize lists for links from this parent
+            links_from_this_parent = []
+            content_area_for_crawl = None
 
-                    # Check if already processed (thread-safe check)
-                    with processed_urls_lock:
-                        if link not in processed_urls:
-                            # Check again right before adding to prevent duplicates if found concurrently in link finding
-                            if link not in next_urls_to_process:
-                                next_urls_to_process.add(link)
+            if result_tuple:
+                 content_area_for_crawl, extracted_document_urls = result_tuple
+                 # Add explicitly found document URLs first
+                 links_from_this_parent.extend(extracted_document_urls)
+            # else: It was likely a PDF download, which has no tuple in scrape_results
+            # Or the scrape failed for this parent_url
+
+            # If crawling is enabled and we have content, find general sub-links
+            if args.crawl and content_area_for_crawl:
+                 sub_links = find_sub_links(parent_url, content_area_for_crawl)
+                 links_from_this_parent.extend(sub_links)
+            elif args.crawl and not content_area_for_crawl and result_tuple:
+                 # HTML scrape succeeded, but content area is null (should be rare if scrape succeeded)
+                 logging.debug(f"Crawling enabled, but no content_area found for {parent_url} to find sub-links.")
+
+            # Filter and add unique links found from this parent URL
+            if links_from_this_parent:
+                 parent_domain = urlparse(parent_url).netloc
+                 for link in set(links_from_this_parent): # Use set to process unique links from this parent
+                     # Apply domain restriction if needed
+                     if args.same_domain:
+                         link_domain = urlparse(link).netloc
+                         if link_domain != parent_domain:
+                             logging.debug(f"Skipping different domain link: {link} (parent: {parent_url})")
+                             continue
+
+                     # Check if already processed (thread-safe check)
+                     with processed_urls_lock: # Re-acquire lock briefly to update results
+                         if link not in processed_urls:
+                             # Check again right before adding to prevent duplicates if found concurrently in link finding
+                             if link not in next_urls_to_process:
+                                 next_urls_to_process.add(link)
 
         if not next_urls_to_process:
             logging.info(f"No new, valid, unprocessed URLs found for Depth {current_depth + 1}. Stopping crawl.")
@@ -355,6 +443,57 @@ def main():
         scrape_results.clear()
 
     logging.info(f"Scraping process completed. Processed {len(processed_urls)} unique URLs in total up to depth {current_depth}.")
+
+# --- Helper function to parse a single feed --- 
+def parse_feed(feed_url):
+    urls_from_feed = []
+    logging.info(f"Fetching feed URL: {feed_url}")
+    try:
+        feed_data = feedparser.parse(feed_url)
+        if feed_data.bozo:
+             logging.warning(f"Feed may be ill-formed ({feed_url}): {feed_data.bozo_exception}")
+        if not feed_data.entries:
+             logging.warning(f"No entries found in feed: {feed_url}")
+        else:
+            for entry in feed_data.entries:
+                if 'link' in entry:
+                    urls_from_feed.append(entry.link)
+                    logging.info(f"  Added URL from feed ({feed_url}): {entry.link}")
+                else:
+                    logging.warning(f"  Skipping feed entry without link ({feed_url}): {entry.get('title', '[No Title]')}")
+    except Exception as e:
+        logging.error(f"Failed to parse feed {feed_url}: {e}")
+        # Optionally raise or return an empty list on error
+    return urls_from_feed
+
+def scrape_and_process(url, output_dir, user_agent, processed_urls_lock, scrape_results):
+    # Lock released, now perform I/O
+    try:
+        # --- Check if URL is a PDF --- 
+        parsed_target_url = urlparse(url)
+        # Check the path component for the extension
+        if parsed_target_url.path and parsed_target_url.path.lower().endswith('.pdf'):
+            logging.debug(f"Identified PDF: {url}. Attempting direct download.")
+            # Call the dedicated download function
+            success_url = download_binary_file(url, output_dir, user_agent)
+            # PDFs don't have 'content_area' for link finding, so nothing added to scrape_results
+            return success_url # Returns URL on success, None on failure
+        else:
+            # --- Process as HTML page --- 
+            logging.debug(f"Processing as HTML: {url}")
+            content_area, document_urls = scrape_content(url, output_dir, user_agent)
+            if content_area:
+                # Store result for potential later link finding (needs lock)
+                with processed_urls_lock: # Re-acquire lock briefly to update results
+                    scrape_results[url] = (content_area, document_urls) # Store the tuple
+                return url # Return URL on success
+            else:
+                # Failed to scrape HTML content
+                return None # Indicate failure
+    except Exception as e:
+        logging.error(f"Error processing URL {url} in thread: {e}")
+        # No need to manually release lock here, `with` handles it on exit/exception
+        return None # Indicate failure
 
 if __name__ == "__main__":
     main()
