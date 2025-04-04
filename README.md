@@ -26,21 +26,27 @@ This application scrapes content from specified gov.uk URLs, converts the main c
 ## Usage
 
 ```bash
-# Scrape specific URLs
-python scraper.py <url1> [url2 ...] [--crawl] [--max-depth N] [--output-dir OUTPUT_DIRECTORY]
+# Scrape specific URLs (optionally crawl links)
+python scraper.py <url1> [url2 ...] [-o DIR] [--user-agent UA] [--crawl] [--max-depth N] [--same-domain] [-w N]
 
-# Scrape URLs from a feed
-python scraper.py --feed-url <feed_url> [--output-dir OUTPUT_DIRECTORY]
+# Scrape URLs from a single feed (crawling can be enabled)
+python scraper.py --feed-url <feed_url> [-o DIR] [--user-agent UA] [--crawl] [--max-depth N] [--same-domain] [-w N]
+
+# Scrape URLs from multiple feeds listed in a file (crawling can be enabled)
+python scraper.py --feed-file <path_to_feeds.txt> [-o DIR] [--user-agent UA] [--crawl] [--max-depth N] [--same-domain] [-w N]
 ```
 
 **Arguments:**
 
-*   `url`: One or more gov.uk URLs to scrape. (Mutually exclusive with `--feed-url`).
-*   `--feed-url`: URL of an RSS/Atom feed. If provided, the script scrapes the article URLs found in the feed. (Mutually exclusive with providing specific URLs).
-*   `--crawl`: (Optional) If specified, the scraper will also process relevant sub-links found on the initial pages *when specific URLs are provided*. Crawling is disabled when using `--feed-url`.
-*   `--max-depth`: (Optional) Specify the maximum crawl depth (default: 1). Only used if `--crawl` is specified *and specific URLs are provided*.
-*   `--output-dir`: (Optional) Specify the directory where Markdown files should be saved. Defaults to 'output'.
-*   `--user-agent`: (Optional) Specify a custom User-Agent string for HTTP requests.
+*   `URL`: (Positional) One or more gov.uk URLs to scrape. Used if no feed options are provided.
+*   `--feed-url <FEED_URL>`: URL of a single RSS/Atom feed to process. Articles from the feed will be scraped.
+*   `--feed-file <FEED_FILE>`: Path to a text file containing multiple feed URLs (one per line). Articles from all feeds will be scraped.
+*   `-o DIR`, `--output-dir DIR`: Directory to save the resulting Markdown files (default: `output`).
+*   `--user-agent UA`: Custom User-Agent string for HTTP requests.
+*   `--crawl`: Enable crawling of relevant sub-links (within `gov.uk`) found on scraped pages.
+*   `--max-depth N`: Maximum crawl depth when `--crawl` is enabled. `0` means only scrape the initial URLs (from args or feeds), `1` means initial URLs plus the links found within them, etc. Requires `--crawl`.
+*   `--same-domain`: When crawling, only follow links that are on the exact same domain (e.g., `www.gov.uk`) as the page they were found on. Requires `--crawl`.
+*   `-w N`, `--workers N`: Number of parallel workers (threads) to use for scraping (default: CPU count or 4).
 
 **Examples:**
 
