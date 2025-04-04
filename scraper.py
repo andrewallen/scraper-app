@@ -8,6 +8,8 @@ import logging
 from urllib.parse import urlparse, urljoin
 import feedparser # Import feedparser
 from datetime import datetime # Import datetime
+import concurrent.futures # Added for parallel processing
+import threading # Added for locks
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -195,125 +197,164 @@ def find_sub_links(base_url, content_area):
 def main():
     parser = argparse.ArgumentParser(description='Scrape content from gov.uk URLs or an RSS/Atom feed and convert to Markdown.')
     # Make URL input optional if feed URL is provided
-    url_group = parser.add_mutually_exclusive_group(required=True)
+    url_group = parser.add_mutually_exclusive_group(required=False) # Changed required to False temporarily
     url_group.add_argument('urls', metavar='URL', type=str, nargs='*', default=[],
-                        help='One or more gov.uk URLs to scrape. Ignored if --feed-url or --feed-file is used.')
+                        help='One or more gov.uk URLs to scrape. Used if no feed options are provided.')
     url_group.add_argument('--feed-url', type=str, default=None,
-                        help='URL of a single RSS/Atom feed to scrape articles from.')
+                        help='URL of a single RSS/Atom feed to process.')
     url_group.add_argument('--feed-file', type=str, default=None,
-                        help='Path to a text file containing a list of RSS/Atom feed URLs (one per line).')
+                        help='Path to a file containing multiple feed URLs (one per line).')
 
+    parser.add_argument('-o', '--output-dir', type=str, default='output',
+                        help='Directory to save Markdown files.')
+    parser.add_argument('--user-agent', type=str, default='ScraperBot/1.0 (+http://example.com/bot)',
+                        help='User-Agent string for requests.')
+    parser.add_argument('--max-depth', type=int, default=0, # Default to 0 (no crawling beyond initial URLs)
+                        help='Maximum crawl depth (0=initial URLs only, 1=initial+links, etc.). Requires --crawl.')
     parser.add_argument('--crawl', action='store_true',
-                        help='Enable crawling of sub-links found within the content (applies to non-feed URLs).'
-                             ' Note: Crawling is NOT performed on articles found via feed.') # Clarify crawl applies to direct URLs
-    parser.add_argument('--same-domain', action='store_true', help='Only crawl links within the same domain as the starting URL.')
-    parser.add_argument('--output-dir', type=str, default='output',
-                        help='Directory to save the Markdown files (default: output).')
-    parser.add_argument('--max-depth', type=int, default=1,
-                        help='Maximum crawl depth (1 means only initial URLs, 2 means initial + their links, etc.). Only used if --crawl is specified. Default is 1.')
-    parser.add_argument('--user-agent', type=str, default='Mozilla/5.0 (compatible; MyScraperBot/1.0; +http://example.com/bot)',
-                        help='Custom User-Agent string for requests.')
-
+                        help='Enable crawling of sub-links found within scraped pages.')
+    parser.add_argument('--same-domain', action='store_true',
+                        help='When crawling, only follow links within the same domain as the parent page.')
+    parser.add_argument('-w', '--workers', type=int, default=os.cpu_count() or 4, # Default to CPU count or 4
+                        help='Number of parallel workers for scraping.')
 
     args = parser.parse_args()
 
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
-        logging.info(f"Created output directory: {args.output_dir}")
+    # --- Input Validation --- 
+    if not args.urls and not args.feed_url and not args.feed_file:
+        parser.error('At least one of URL, --feed-url, or --feed-file must be provided.')
 
-    initial_urls = []
-    feed_urls_to_process = []
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
 
-    if args.feed_url: # Single feed URL
-        feed_urls_to_process.append(args.feed_url)
-    elif args.feed_file: # File containing multiple feed URLs
-        logging.info(f"Reading feed URLs from file: {args.feed_file}")
+    initial_urls_from_args = set(args.urls) # Use a set to avoid duplicates initially
+    feed_urls_to_parse = []
+
+    # --- Gather Feed URLs --- 
+    if args.feed_url:
+        feed_urls_to_parse.append(args.feed_url)
+    elif args.feed_file:
         try:
             with open(args.feed_file, 'r') as f:
-                for line in f:
-                    url = line.strip()
-                    if url and not url.startswith('#'): # Ignore empty lines and comments
-                        feed_urls_to_process.append(url)
+                feed_urls_to_parse.extend([line.strip() for line in f if line.strip()])
+            logging.info(f"Read {len(feed_urls_to_parse)} feed URLs from {args.feed_file}")
         except FileNotFoundError:
             logging.error(f"Feed file not found: {args.feed_file}")
-            print(f"Error: Feed file not found: {args.feed_file}")
-            exit(1)
-        except IOError as e:
+            return # Exit if feed file is specified but not found
+        except Exception as e:
             logging.error(f"Error reading feed file {args.feed_file}: {e}")
-            print(f"Error: Could not read feed file: {args.feed_file}")
-            exit(1)
+            return
+
+    # --- Parse Feeds (in parallel if multiple) --- 
+    if feed_urls_to_parse:
+        logging.info(f"Parsing {len(feed_urls_to_parse)} feeds using up to {args.workers} workers...")
+        urls_from_all_feeds = set()
+        # Use a smaller number of workers for feed parsing if there are few feeds
+        feed_workers = min(args.workers, len(feed_urls_to_parse))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=feed_workers) as executor:
+            # Submit all feed parsing tasks
+            future_to_feed = {executor.submit(parse_feed, feed_url): feed_url for feed_url in feed_urls_to_parse}
+            for future in concurrent.futures.as_completed(future_to_feed):
+                feed_url = future_to_feed[future]
+                try:
+                    urls_from_single_feed = future.result()
+                    if urls_from_single_feed:
+                        urls_from_all_feeds.update(urls_from_single_feed)
+                        logging.info(f"Successfully parsed {feed_url}, found {len(urls_from_single_feed)} URLs.")
+                    else:
+                         logging.warning(f"No URLs extracted from feed: {feed_url}")
+                except Exception as exc:
+                    logging.error(f'Feed {feed_url} generated an exception during parsing: {exc}')
+        # Combine URLs from args and feeds
+        initial_urls_to_scrape = initial_urls_from_args.union(urls_from_all_feeds)
     else:
-        initial_urls = args.urls # Use the directly provided URLs if no feed option used
+        initial_urls_to_scrape = initial_urls_from_args
 
-    # Process feeds if any were specified
-    if feed_urls_to_process:
-        for feed_url in feed_urls_to_process:
-            article_urls = parse_feed(feed_url)
-            initial_urls.extend(article_urls)
+    # --- Setup for Staged Crawling --- 
+    processed_urls = set() # Keep track of all URLs processed across depths
+    scrape_results = {} # Store content_area results {url: content_area_soup_object}
+    processed_urls_lock = threading.Lock() # Lock for accessing shared sets/dicts
 
-        # Remove duplicates that might come from multiple feeds
-        initial_urls = list(dict.fromkeys(initial_urls))
+    urls_to_process_this_depth = list(initial_urls_to_scrape)
+    current_depth = 0
 
-    if not initial_urls:
-        logging.warning("No URLs provided directly or via feed(s). Nothing to scrape.")
-        exit(0)
+    # Adjust max_depth based on --crawl flag: 0 means only initial, 1 means initial+links, etc.
+    effective_max_depth = args.max_depth if args.crawl else 0
 
-    processed_urls = set()
-    # Use a dictionary to track URLs and their depth
-    # Only apply depth > 1 if crawling is enabled *and* we are not processing feed URLs
-    start_depth = 1
-    # Determine max depth: Apply only if crawl is enabled AND no feed option was used
-    is_feed_mode = bool(args.feed_url or args.feed_file)
-    max_process_depth = args.max_depth if args.crawl and not is_feed_mode else 1
+    # --- Main Crawl Loop --- 
+    while urls_to_process_this_depth and current_depth <= effective_max_depth:
+        logging.info(f"--- Starting scrape for Depth {current_depth} ({len(urls_to_process_this_depth)} URLs) --- ")
+ 
+        # URLs found in this stage that produced content, used for link finding next
+        successfully_scraped_this_depth = set()
 
-    urls_to_process = {url: start_depth for url in initial_urls} # Start at depth 1
+        # Use ThreadPoolExecutor for parallel scraping at this depth
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+            future_to_url = {}
+            for url in urls_to_process_this_depth:
+                with processed_urls_lock:
+                    if url in processed_urls:
+                        continue # Skip if already added to processed set (e.g., from a previous depth)
+                    processed_urls.add(url) # Mark as processed *before* submitting
+                future = executor.submit(scrape_content, url, args.output_dir, args.user_agent)
+                future_to_url[future] = url
 
-    while urls_to_process:
-        # Get the next URL to process (simple approach, not prioritizing depth levels)
-        # A more sophisticated approach might use separate queues per depth level
-        current_url, current_depth = urls_to_process.popitem()
+            processed_count_this_depth = 0
+            for future in concurrent.futures.as_completed(future_to_url):
+                url = future_to_url[future]
+                processed_count_this_depth += 1
+                try:
+                    result = future.result() # result is the content_area or None
+                    if result:
+                        logging.debug(f"Successfully scraped {url} (Depth {current_depth}, Task {processed_count_this_depth}/{len(future_to_url)})")
+                        # Store result thread-safely (though dict assignment is generally atomic)
+                        with processed_urls_lock:
+                             scrape_results[url] = result
+                        successfully_scraped_this_depth.add(url)
+                    # else: logging handled in scrape_content
 
-        if current_url in processed_urls:
-            continue
+                except Exception as exc:
+                    logging.error(f'URL {url} (Depth {current_depth}) generated an exception during scraping: {exc}')
 
-        # Check domain before processing
-        parsed_url = urlparse(current_url)
-        if not parsed_url.netloc or not parsed_url.netloc.endswith('gov.uk'):
-            logging.warning(f"Skipping non-gov.uk or invalid URL: {current_url}")
-            processed_urls.add(current_url) # Mark as processed to avoid loops
-            continue
+        logging.info(f"--- Finished scraping for Depth {current_depth} --- ")
 
-        logging.info(f"Processing URL (Depth {current_depth}): {current_url}")
-        # Pass user_agent to scrape_content
-        content_area = scrape_content(current_url, args.output_dir, args.user_agent)
-        processed_urls.add(current_url)
+        # --- Find links for the next depth (if crawling) --- 
+        next_urls_to_process = set()
+        logging.info(f"Finding sub-links from Depth {current_depth} results ({len(successfully_scraped_this_depth)} pages)...")
+        
+        # Sequentially process results from the completed depth to find links for the next
+        for parent_url in successfully_scraped_this_depth:
+            content_area = scrape_results.get(parent_url) # Get result stored earlier
+            if content_area:
+                sub_links = find_sub_links(parent_url, content_area)
+                parent_domain = urlparse(parent_url).netloc
+                for link in sub_links:
+                    # Apply domain restriction if needed
+                    if args.same_domain:
+                        link_domain = urlparse(link).netloc
+                        if link_domain != parent_domain:
+                            logging.debug(f"Skipping different domain link: {link} (parent: {parent_url})")
+                            continue
 
-        # Determine if crawling should be enabled
-        should_crawl = args.crawl  # Correctly base crawling on the --crawl flag
+                    # Check if already processed (thread-safe check)
+                    with processed_urls_lock:
+                        if link not in processed_urls:
+                            # Check again right before adding to prevent duplicates if found concurrently in link finding
+                            if link not in next_urls_to_process:
+                                next_urls_to_process.add(link)
 
-        # Create output directory if it doesn't exist
-        output_dir = args.output_dir
+        if not next_urls_to_process:
+            logging.info(f"No new, valid, unprocessed URLs found for Depth {current_depth + 1}. Stopping crawl.")
+            break
 
-        # Find and add sub-links if crawling is enabled and depth allows
-        if should_crawl and content_area and current_depth < args.max_depth:
-            sub_links = find_sub_links(current_url, content_area)
-            next_depth = current_depth + 1
-            current_domain = urlparse(current_url).netloc # Get domain of the current page
-            for link in sub_links:
-                if link not in processed_urls and link not in urls_to_process:
-                     # Check if crawling is restricted to the same domain
-                     if args.same_domain:
-                         link_domain = urlparse(link).netloc
-                         if link_domain != current_domain:
-                             logging.debug(f"Skipping different domain link ({link_domain} != {current_domain}): {link}")
-                             continue # Skip this link
+        # Prepare for the next iteration
+        urls_to_process_this_depth = list(next_urls_to_process)
+        current_depth += 1
 
-                     # If checks pass, add to queue
-                     urls_to_process[link] = next_depth
-                     logging.info(f"  Queueing sub-link (Depth {next_depth}): {link}")
+        # Clear results from previous depth to save memory (optional)
+        scrape_results.clear()
 
-
-    logging.info(f"Scraping process finished. Processed {len(processed_urls)} unique URLs.")
+    logging.info(f"Scraping process completed. Processed {len(processed_urls)} unique URLs in total up to depth {current_depth}.")
 
 if __name__ == "__main__":
     main()
