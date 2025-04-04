@@ -1,0 +1,5 @@
+requests
+beautifulsoup4
+markdownify
+argparse
+feedparser # Added for RSS/Atom feed parsing

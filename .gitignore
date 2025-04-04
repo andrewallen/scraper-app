@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Python (if applicable)
+__pycache__/
+*.pyc
+.env
+
+# Node.js (if applicable)
+node_modules/
+
+# script output
+output/
