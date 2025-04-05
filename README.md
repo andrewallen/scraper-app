@@ -9,6 +9,21 @@ This application scrapes content from specified gov.uk URLs, converts the main c
 *   Save the scraped content as individual Markdown files.
 *   Optionally crawl sub-pages found within the main content area.
 
+## Code Structure
+
+The application has been refactored into a modular structure to improve organization, maintainability, and readability. The core logic is now separated into specific components within the `scraper_app` directory:
+
+*   **`scraper.py`**: The main entry point script. It handles command-line argument parsing, orchestrates the scraping process, and manages concurrency using threads.
+*   **`scraper_app/`**: A Python package containing the core modules.
+    *   **`__init__.py`**: Makes `scraper_app` a package.
+    *   **`constants.py`**: Defines constants used throughout the application, such as default configuration values (output directory, user agent, timeouts), and CSS selectors for identifying content areas.
+    *   **`utils.py`**: Contains general utility functions, like `sanitize_filename` for creating safe filenames.
+    *   **`storage.py`**: Handles file system operations, including generating appropriate filenames based on URLs and dates (`generate_filename`) and downloading binary files (`download_binary_file`).
+    *   **`parse_html.py`**: Responsible for fetching HTML content, parsing it using BeautifulSoup, extracting the main content and metadata, identifying document links, finding sub-links for crawling, and converting HTML to Markdown (`parse_and_save_html`, `find_sub_links`).
+    *   **`parse_feed.py`**: Handles the parsing of RSS/Atom feeds to extract article URLs (`parse_feed`).
+
+This separation of concerns makes the codebase easier to understand, test, and modify.
+
 ## Requirements
 
 *   Python 3.x
