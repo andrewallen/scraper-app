@@ -1,3 +1,5 @@
+"""Handles parsing of RSS/Atom feeds to extract article URLs."""
+
 import logging
 import feedparser
 from typing import List

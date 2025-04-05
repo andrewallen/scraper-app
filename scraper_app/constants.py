@@ -1,7 +1,13 @@
-\
-from typing import List
+"""Defines constants used throughout the scraper application.
+
+Includes default configurations, CSS selectors for content extraction
+(primarily targeting gov.uk structure, but with fallback considerations),
+and other fixed values.
+"""
 
 # --- Constants for Selectors ---
+# These selectors attempt to find the core content and metadata.
+# If these fail, the parser will fall back to using the entire body content.
 LEAD_PARAGRAPH_SELECTORS: List[str] = ['p.gem-c-lead-paragraph', 'p.govuk-body-l']
 METADATA_SELECTORS: List[str] = ['.gem-c-metadata', '.govuk-body-s']
 CONTENT_AREA_SELECTORS: List[str] = ['main#content .govuk-govspeak', 'main#content']

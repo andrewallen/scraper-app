@@ -1,3 +1,5 @@
+"""Utility functions for the scraper application."""
+
 import re
 import os
 from .constants import MAX_FILENAME_LEN

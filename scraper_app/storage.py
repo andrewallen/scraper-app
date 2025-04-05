@@ -1,3 +1,5 @@
+"""Handles file system operations like filename generation and file downloading."""
+
 import os
 import logging
 import re
@@ -135,6 +137,28 @@ def download_binary_file(url: str, output_dir: str, user_agent: str) -> Optional
         if not extension:
             logging.warning(f"Could not determine file extension for {url} (Content-Type: {content_type}). Using '.bin'")
             extension = '.bin'
+
+        # Filename fallback order:
+        # 1. Content-Disposition header
+        # 2. Last path component of the URL
+        # 3. Derived from Content-Type header (e.g., document.pdf)
+        # 4. Default 'downloaded_file.bin'
+        filename_from_cd = filename_from_header
+        filename_from_url = os.path.basename(parsed_url.path)
+        filename_from_type = f"downloaded_file{extension}"
+        filename = filename_from_cd or filename_from_url or filename_from_type or "downloaded_file.bin"
+
+        # Fallback: Try to extract date from URL path (common in blogs/news)
+        # Assumes a /YYYY/MM/DD/ structure somewhere in the path.
+        match = re.search(r'/(\d{4})/(\d{2})/(\d{2})/', parsed_url.path)
+        if match:
+            year_str, month_str, day_str = match.groups()
+            try:
+                # Pad month/day if needed for strptime
+                file_date = datetime.strptime(f"{year_str}-{int(month_str):02d}-{int(day_str):02d}", '%Y-%m-%d')
+                formatted_date_prefix = file_date.strftime('%Y-%m-%d')
+            except ValueError:
+                logging.warning(f"Invalid date {year_str}-{month_str}-{day_str} in binary URL path {parsed_url.path}, skipping date prefix.")
 
         # Generate filename using the consolidated function, passing the determined extension
         domain_dir, temp_filepath = generate_filename(url, output_dir, formatted_date_prefix, extension)

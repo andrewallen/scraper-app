@@ -1,3 +1,5 @@
+"""Handles fetching, parsing, and saving content from individual HTML pages."""
+
 import logging
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -16,25 +18,23 @@ from .constants import (
 )
 from .storage import generate_filename
 
-def find_sub_links(tag: BeautifulSoup, base_url: str) -> List[str]:
-    """Finds potential sub-links within a given BeautifulSoup Tag.
+def find_sub_links(content_soup: BeautifulSoup, base_url: str) -> List[str]:
+    """Finds potential sub-links (likely other pages to scrape) within the content area.
 
     Args:
-        tag: The BeautifulSoup tag (or the whole soup object) to search within.
+        content_soup: The BeautifulSoup object of the content area to search within.
         base_url: The base URL to resolve relative links.
 
     Returns:
-        A list of absolute URLs found within the tag.
+        A list of absolute URLs found within the content area.
     """
     sub_links = []
-    parsed_base = urlparse(base_url)
-    if not tag:
+    if not content_soup:
         return sub_links
 
-    # base_domain = urlparse(base_url).netloc # Keep for potential future use
-
-    for link in tag.find_all('a', href=True):
-        href = link['href']
+    # Find all links within the main content area
+    for a_tag in content_soup.find_all('a', href=True):
+        href = a_tag['href']
         try:
             absolute_url = urljoin(base_url, href)
             parsed_absolute_url = urlparse(absolute_url)
@@ -89,9 +89,10 @@ def parse_and_save_html(url: str, output_dir: str, user_agent: str) -> Tuple[Opt
 
     soup = BeautifulSoup(response.content, 'html.parser')
 
-    # --- Extract Metadata --- (Copied and adapted from original scrape_content)
-    title_tag = soup.find('h1')
-    title_text = f"# {title_tag.get_text(strip=True)}\n\n" if title_tag else ""
+    # --- Metadata Extraction (Heuristics based on common patterns, e.g., gov.uk) ---
+    metadata_dict = {}
+    title = soup.title.string if soup.title else "No Title Found"
+    title_text = f"# {title}\n\n"
 
     lead_paragraph_text = ""
     for selector in LEAD_PARAGRAPH_SELECTORS:
@@ -151,7 +152,7 @@ def parse_and_save_html(url: str, output_dir: str, user_agent: str) -> Tuple[Opt
     # Convert the found content area to Markdown
     markdown_content = md(str(content_area), heading_style="ATX") if content_area else ""
 
-    # --- Extract Document Links --- (Copied and adapted from original scrape_content)
+    # --- Link Finding (Heuristics based on structure and file extensions) ---
     document_links_md = ""
     attachment_sections: List[Tag] = []
     for selector in ATTACHMENT_SELECTORS:

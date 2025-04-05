@@ -1,28 +1,33 @@
-# Gov.uk Content Scraper
+# Web Content Scraper
 
-This application scrapes content from specified gov.uk URLs, converts the main content to Markdown, and saves it locally. It can optionally crawl and scrape sub-pages linked from the initial URLs.
+This application scrapes content from specified URLs or RSS/Atom feeds, converts the main content to Markdown, saves linked documents, and saves the result locally. It can optionally crawl and scrape sub-pages linked from the initial URLs.
 
 ## Features
 
-*   Scrape content from one or more gov.uk URLs.
+*   Scrape content from one or more URLs or feed sources.
 *   Convert the main article content to Markdown format.
-*   Save the scraped content as individual Markdown files.
+*   Identify and download linked documents (PDFs, DOCX, etc.) from scraped pages.
+*   Save scraped text content as individual Markdown files, organized by domain.
+*   Save downloaded documents in the same domain-specific directories.
 *   Optionally crawl sub-pages found within the main content area.
+*   Attempts to extract structured metadata (Title, Lead Paragraph, Author, Published Date) if available in common formats.
+*   Falls back to using the entire page body if specific content selectors fail.
+*   Supports concurrent scraping and downloading using threads for faster processing.
 
 ## Code Structure
 
-The application has been refactored into a modular structure to improve organization, maintainability, and readability. The core logic is now separated into specific components within the `scraper_app` directory:
+The application is structured into a modular package `scraper_app` to enhance organization, maintainability, and readability:
 
-*   **`scraper.py`**: The main entry point script. It handles command-line argument parsing, orchestrates the scraping process, and manages concurrency using threads.
-*   **`scraper_app/`**: A Python package containing the core modules.
-    *   **`__init__.py`**: Makes `scraper_app` a package.
-    *   **`constants.py`**: Defines constants used throughout the application, such as default configuration values (output directory, user agent, timeouts), and CSS selectors for identifying content areas.
-    *   **`utils.py`**: Contains general utility functions, like `sanitize_filename` for creating safe filenames.
-    *   **`storage.py`**: Handles file system operations, including generating appropriate filenames based on URLs and dates (`generate_filename`) and downloading binary files (`download_binary_file`).
-    *   **`parse_html.py`**: Responsible for fetching HTML content, parsing it using BeautifulSoup, extracting the main content and metadata, identifying document links, finding sub-links for crawling, and converting HTML to Markdown (`parse_and_save_html`, `find_sub_links`).
-    *   **`parse_feed.py`**: Handles the parsing of RSS/Atom feeds to extract article URLs (`parse_feed`).
+*   **`scraper.py`**: The main command-line interface and entry point. Handles argument parsing, orchestrates the scraping workflow (fetching initial URLs, managing the thread pool, processing results), and sets up logging.
+*   **`scraper_app/`**: The core Python package.
+    *   **`__init__.py`**: Marks the directory as a Python package.
+    *   **`constants.py`**: Centralizes constant values like default configurations (output directory, user agent, timeouts, worker counts), CSS selectors (primarily targeting gov.uk structure, but with fallbacks considered), and filename length limits.
+    *   **`utils.py`**: Provides general utility functions, currently including `sanitize_filename` for creating filesystem-safe filenames from potentially problematic strings.
+    *   **`storage.py`**: Manages file system interactions. Includes logic for generating structured filenames and directory paths based on URLs and dates (`generate_filename`) and handling the download and saving of binary files/documents (`download_binary_file`), determining file types where possible.
+    *   **`parse_html.py`**: Contains the logic for handling individual HTML pages. It fetches the page (`requests`), parses it (`BeautifulSoup`), attempts to extract metadata and the main content based on `constants.py` selectors (falling back to `<body>`), converts content to Markdown (`markdownify`), finds linked documents and potential sub-links for crawling, and coordinates saving the Markdown content via `storage.py`.
+    *   **`parse_feed.py`**: Handles fetching and parsing of RSS/Atom feeds using `feedparser` to extract a list of article URLs for processing.
 
-This separation of concerns makes the codebase easier to understand, test, and modify.
+This modular design allows for easier testing and modification of individual components (e.g., adding new content selectors, changing storage methods).
 
 ## Requirements
 
@@ -53,44 +58,59 @@ python scraper.py --feed-file <path_to_feeds.txt> [-o DIR] [--user-agent UA] [--
 
 **Arguments:**
 
-*   `URL`: (Positional) One or more gov.uk URLs to scrape. Used if no feed options are provided.
-*   `--feed-url <FEED_URL>`: URL of a single RSS/Atom feed to process. Articles from the feed will be scraped.
+*   `URL`: (Positional) One or more URLs to scrape. Required if no feed options are provided.
+*   `--feed-url <FEED_URL>`: URL of a single RSS/Atom feed. Articles from the feed will be scraped.
 *   `--feed-file <FEED_FILE>`: Path to a text file containing multiple feed URLs (one per line). Articles from all feeds will be scraped.
-*   `-o DIR`, `--output-dir DIR`: Directory to save the resulting Markdown files (default: `output`).
+*   `-o DIR`, `--output-dir DIR`: Directory to save the resulting Markdown and document files (default: `output`). Files will be organized into subdirectories based on the domain name.
 *   `--user-agent UA`: Custom User-Agent string for HTTP requests.
-*   `--crawl`: Enable crawling of relevant sub-links (within `gov.uk`) found on scraped pages.
-*   `--max-depth N`: Maximum crawl depth when `--crawl` is enabled. `0` means only scrape the initial URLs (from args or feeds), `1` means initial URLs plus the links found within them, etc. Requires `--crawl`.
-*   `--same-domain`: When crawling, only follow links that are on the exact same domain (e.g., `www.gov.uk`) as the page they were found on. Requires `--crawl`.
-*   `-w N`, `--workers N`: Number of parallel workers (threads) to use for scraping (default: CPU count or 4).
+*   `--crawl`: Enable crawling of relevant sub-links found on scraped pages.
+*   `--max-depth N`: Maximum crawl depth when `--crawl` is enabled. `0` means only scrape the initial URLs (from args or feeds), `1` means initial URLs plus the links found within them, etc.
+*   `--same-domain`: When crawling, only follow links that are on the exact same domain (e.g., `www.example.com`) as the page they were found on.
+*   `-w N`, `--workers N`: Number of parallel workers (threads) to use for scraping and downloading (default: calculated based on CPU count).
 
 **Examples:**
 
 *   Scrape a single page:
     ```bash
-    python scraper.py https://www.gov.uk/some-page
+    python scraper.py https://example.com/some-page
     ```
 *   Scrape multiple pages and save to a specific directory:
     ```bash
-    python scraper.py https://www.gov.uk/page-one https://www.gov.uk/page-two --output-dir ./scraped_content
+    python scraper.py https://example.com/page-one https://anothersite.org/article --output-dir ./scraped_content
     ```
-*   Scrape a page and crawl its sub-links (depth 2):
+*   Scrape a page and crawl its sub-links (depth 2), staying on the same domain:
     ```bash
-    python scraper.py https://www.gov.uk/main-topic --crawl --max-depth 2
+    python scraper.py https://example.com/main-topic --crawl --max-depth 2 --same-domain
     ```
 *   Scrape all articles from an Atom feed:
     ```bash
-    python scraper.py --feed-url 'https://www.gov.uk/government/organisations/government-digital-service.atom' --output-dir ./gds_feed_articles
+    python scraper.py --feed-url 'https://example.com/feed.atom' --output-dir ./feed_articles
     ```
 
 ## How it Works
 
-1.  The script fetches the HTML content of the provided URL(s).
-2.  It uses BeautifulSoup to parse the HTML and identify the main content section (heuristics based on common gov.uk page structures might be used).
-3.  The HTML of the main content is converted to Markdown using the `markdownify` library.
-4.  The Markdown content is saved to a `.md` file named after the URL slug in the specified output directory.
-5.  If `--feed-url` is provided, the script first fetches and parses the feed to get a list of article URLs to process.
-6.  If specific URLs are provided *and* `--crawl` is enabled, it looks for links within the main content area that point to other gov.uk pages and repeats the process for those URLs (up to `--max-depth`, avoiding loops and external links).
+1.  The script parses command-line arguments.
+2.  It determines the initial list of URLs to process, either from direct arguments, a single feed URL, or a file containing multiple feed URLs.
+3.  A thread pool (`ThreadPoolExecutor`) is created to manage concurrent tasks.
+4.  Initial URLs are submitted to the pool for processing by the `scrape_and_process` function.
+5.  `scrape_and_process` calls `parse_and_save_html` (from `parse_html.py`):
+    *   Fetches the HTML using `requests`.
+    *   Parses the HTML using `BeautifulSoup`.
+    *   Attempts to find the main content area using predefined CSS selectors (defined in `constants.py`). If specific selectors fail, it falls back to using the entire `<body>`.
+    *   Attempts to extract metadata (title, lead paragraph, published date, etc.) based on common patterns.
+    *   Identifies links to potential documents (PDF, DOCX, etc.) within attachment sections or based on URL patterns.
+    *   Converts the extracted main content HTML to Markdown using `markdownify`.
+    *   Generates a filename and path (using `storage.py`).
+    *   Saves the final Markdown content (Source URL + metadata + content + document links) to the file.
+    *   Returns the parsed BeautifulSoup object for the content area (for crawling) and the list of found document URLs.
+6.  Back in `scrape_and_process`:
+    *   Any discovered document URLs are submitted to the thread pool for download using `download_binary_file` (from `storage.py`).
+    *   If crawling is enabled (`--crawl`) and the current depth is less than `--max-depth`:
+        *   `find_sub_links` (from `parse_html.py`) is called to find potential sub-links within the processed page's content.
+        *   Valid sub-links (that haven't been processed and match `--same-domain` if enabled) are submitted back to the thread pool for processing, incrementing the depth.
+7.  A central lock (`threading.Lock`) ensures that the set of processed URLs (`processed_urls`) is updated safely by multiple threads to prevent redundant work.
+8.  The main thread waits for all submitted tasks (and any tasks they spawn) to complete, logging progress and results.
 
 ## Disclaimer
 
-Web scraping should be done responsibly and ethically. Ensure you comply with the `robots.txt` file and terms of service of gov.uk. This tool is intended for processing publicly available information for analysis and use with LLMs. Excessive scraping can put a strain on website servers.
+Web scraping should be done responsibly and ethically. Always check a website's `robots.txt` file and terms of service before scraping. Respect server load; avoid overly aggressive scraping. This tool is intended for processing publicly available information.

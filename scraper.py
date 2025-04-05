@@ -1,3 +1,5 @@
+"""Main script for the web content scraper application."""
+
 import argparse
 import os
 import logging
